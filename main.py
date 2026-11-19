@@ -462,7 +462,7 @@ def send_email(subject, changes, shows, movie_info, status_text="")
 <body style="margin:0;padding:24px;font-family:Arial,Helvetica,sans-serif;
              font-size:14px;color:#333;background:#fff;">
     <h2 style="margin:0 0 4px 0;font-size:18px;color:#111;">
-        BMS Alert: {escape(movie_name)}
+        {escape(subject)}
     </h2>
     <p style="margin:0 0 8px 0;font-size:13px;color:#666;">
         {escape(now_str)}
