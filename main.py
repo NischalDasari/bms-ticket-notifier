@@ -32,6 +32,7 @@ CONFIG = {
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 RESEND_TO_EMAIL = os.getenv("RESEND_TO_EMAIL", "")
 RESEND_FROM_EMAIL = os.getenv("RESEND_FROM_EMAIL", "aviiciii@resend.dev")
+STATUS_EMAILS_ENABLED = os.getenv("STATUS_EMAILS_ENABLED", "true").strip().lower() not in ("false", "0", "no", "off")
 
 STATE_FILE = "bms_state.json"
 
@@ -389,7 +390,7 @@ def _cat_status_label(status):
     return AVAIL_STATUS_MAP.get(status, ("UNKNOWN", ""))[0]
 
 
-def send_email(subject, changes, shows, movie_info):
+def send_email(subject, changes, shows, movie_info, status_text="")
     api_key = RESEND_API_KEY.strip()
     to = RESEND_TO_EMAIL.strip()
     frm = RESEND_FROM_EMAIL.strip() or "onboarding@resend.dev"
@@ -461,10 +462,13 @@ def send_email(subject, changes, shows, movie_info):
 <body style="margin:0;padding:24px;font-family:Arial,Helvetica,sans-serif;
              font-size:14px;color:#333;background:#fff;">
     <h2 style="margin:0 0 4px 0;font-size:18px;color:#111;">
-        BMS Alert: {escape(movie_name)}
+        {escape(subject)}
     </h2>
-    <p style="margin:0 0 20px 0;font-size:13px;color:#666;">
+    <p style="margin:0 0 8px 0;font-size:13px;color:#666;">
         {escape(now_str)}
+    </p>
+    <p style="margin:0 0 20px 0;font-size:14px;color:#333;">
+        {escape(status_text)}
     </p>
     <hr style="border:none;border-top:1px solid #ddd;margin:0 0 20px 0;">
     {changes_html}
@@ -479,7 +483,7 @@ def send_email(subject, changes, shows, movie_info):
 </html>"""
 
     # Build plain-text version with full show details
-    plain_lines = [subject, "", f"Checked at: {now_str}", ""]
+    plain_lines = [subject, "", f"Checked at: {now_str}", status_text, ""]
     if changes:
         plain_lines.append("Changes Detected:")
         plain_lines.extend(f"  - {c}" for c in changes)
@@ -554,59 +558,66 @@ def main():
     print(f"  Event: {event_code}  Region: {region_code}  "
           f"Dates: {date_list}")
 
-    # Fetch data for each date
+    # Fetch data for each date. An empty showtime list is not a fetch failure.
     all_shows = []
     all_dates = []
-    movie_info = {"name": "Unknown", "language": ""}
+    successful_fetches = 0
+    movie_info = {'name': 'Unknown', 'language': ''}
 
     for dc in date_list:
         data = fetch_bms(event_code, dc, region_code,
                          region_slug_r, lat, lon, geohash)
         if not data:
-            print(f"  ⚠️  No data for date {dc or '(default)'}")
+            print('  ⚠️  No data returned for a requested date.')
             continue
-
-        if movie_info["name"] == "Unknown":
+        successful_fetches += 1
+        if movie_info['name'] == 'Unknown':
             movie_info = parse_movie_info(data)
-
         all_dates.extend(parse_dates(data))
         all_shows.extend(parse_shows(data))
 
-    if not all_shows:
-        print("  ❌ No showtimes found.")
-        sys.exit(0)
-
-    print(f"  🎬 {movie_info['name']}  {movie_info['language']}")
-
-    # Apply filters
-    filtered = filter_shows(
-        all_shows,
-        CONFIG["theatre"],
-        CONFIG["time_period"],
-        CONFIG["dates"],
-    )
-    print(f"  📊 {len(filtered)} showtime(s) after filters")
-
-    # Build state & detect changes
-    new_state = build_state(filtered, all_dates)
-    old_state = load_state()
-
+    filtered = []
     changes = []
-    if old_state:
-        changes = detect_changes(old_state, new_state)
+    if successful_fetches == 0:
+        status_text = (
+            'BookMyShow data could not be retrieved during this check. '
+            'This is a fetch error, not confirmation that bookings are closed. '
+            'Please inspect the GitHub Actions log.'
+        )
+        print('  ❌ No successful BookMyShow responses; keeping previous state.')
+    else:
+        print(f"  🎬 {movie_info['name']}  {movie_info['language']}")
+        filtered = filter_shows(all_shows, CONFIG['theatre'], CONFIG['time_period'], CONFIG['dates'])
+        print(f'  📊 {len(filtered)} matching showtime(s) after filters')
+        old_state = load_state()
+        new_state = build_state(filtered, all_dates)
+        if old_state:
+            changes = detect_changes(old_state, new_state)
+        save_state(new_state)
+        if filtered:
+            status_text = f'Check completed successfully. Found {len(filtered)} matching showtime(s) for the configured filters.'
+        else:
+            status_text = (
+                'BookMyShow data was retrieved successfully, but no showtimes currently match the configured theatre/date/time filters. '
+                'This does not by itself confirm that bookings have not opened.'
+            )
 
-    save_state(new_state)
-
+    # Routine status emails can be disabled without suppressing booking alerts.
     if changes:
-        print(f"\n  ⚡ {len(changes)} change(s) detected:")
+        print(f'  ⚡ {len(changes)} change(s) detected:')
         for c in changes:
-            print(f"     {c}")
+            print(f'     {c}')
+    elif successful_fetches > 0:
+        print('  ✅ No booking changes since last check.')
+
+    if changes or STATUS_EMAILS_ENABLED:
+        subject_prefix = 'BMS Alert' if changes else 'BMS Status'
         send_email(
-            f"BMS Alert: {movie_info['name']} - {len(changes)} change(s)",
-            changes, filtered, movie_info,
+            f"{subject_prefix}: {movie_info['name']}",
+            changes, filtered, movie_info, status_text,
         )
     else:
-        print("  ✅ No changes since last check.")
+        print('  ℹ️ Routine status emails are disabled; booking alerts remain active.')
 
     # Print current status
     print(f"\n  Current status ({len(filtered)} shows):")
